@@ -99,7 +99,7 @@ class AutoTask:
             response.raise_for_status()  # 检查响应状态
 
             # 使用正则表达式匹配host
-            pattern = r'href="https://(.*?)/'
+            pattern = r'href="https://([^/"]+)'
             match = re.search(pattern, response.text)
             if match:
                 host = match.group(1)
