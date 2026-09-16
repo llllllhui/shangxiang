@@ -135,6 +135,10 @@ class AutoTask:
             response = requests.get(url, headers=headers, timeout=15)
             if response.status_code != 200:
                 logging.warning(f"[获取host]域名 {host} 返回 {response.status_code}")
+                if response.status_code in (403, 503):
+                    detail = ' '.join(response.text.split())[:200]
+                    logging.warning(f"[获取host]server={response.headers.get('server')} cf-ray={response.headers.get('cf-ray')} cf-mitigated={response.headers.get('cf-mitigated')}")
+                    logging.warning(f"[获取host]响应内容: {detail}")
                 return False
             # 跳转到其他域名说明该域名已废弃
             if urllib.parse.urlparse(response.url).hostname != host:
@@ -163,8 +167,9 @@ class AutoTask:
             if self.check_host(host):
                 logging.info(f"[获取host]使用域名 {host}")
                 return host
-        logging.error(f"[获取host]候选域名均不可用: {candidates}")
-        return None
+        # 校验未通过时仍继续尝试，避免误判直接中断任务
+        logging.warning(f"[获取host]候选域名均未通过校验，仍尝试使用 {candidates[0]}")
+        return candidates[0]
 
     def get_param(self, host, session):
         """
