@@ -17,9 +17,11 @@ cron: 10 9,10 * * *
 2025/7/28   V1.3    修改头部注释，以便拉库
 2025/8/27   V1.4    修改默认域名
 2026/9/16   V1.5    适配签到算术验证，自动解题并提交答案
+2026/9/16   V1.6    域名增加可用性校验，发布页不可用时使用可用域名
 """
 
-DEFAULT_HOST = "sxsy21.com" # 默认域名
+DEFAULT_HOST = "sxsy45.com" # 默认域名
+PUBLISH_HOSTS = ("sxsy.org", "www.sxsy.org") # 发布页域名，不参与签到
 
 import requests
 import os
@@ -104,6 +106,9 @@ class AutoTask:
             match = re.search(pattern, response.text)
             if match:
                 host = match.group(1)
+                if host in PUBLISH_HOSTS:
+                    logging.warning(f"[获取host]获取到发布页域名 {host}，忽略")
+                    return DEFAULT_HOST
                 logging.info(f"[获取host]{host}")
                 return host
             logging.warning("[获取host]无法获取host，使用默认域名")
@@ -114,6 +119,52 @@ class AutoTask:
         except Exception as e:
             logging.error(f"[获取host]发生未知错误: {str(e)}\n{traceback.format_exc()}")
             return DEFAULT_HOST
+
+    def check_host(self, host):
+        """
+        校验域名是否为可用的论坛域名
+        :param host: 域名
+        :return: 是否可用
+        """
+        try:
+            url = f"https://{host}/member.php?mod=logging&action=login&infloat=yes&frommessage&inajax=1&ajaxtarget=messagelogin"
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36 Edg/137.0.0.0',
+                'Host': host
+            }
+            response = requests.get(url, headers=headers, timeout=15)
+            if response.status_code != 200:
+                logging.warning(f"[获取host]域名 {host} 返回 {response.status_code}")
+                return False
+            # 跳转到其他域名说明该域名已废弃
+            if urllib.parse.urlparse(response.url).hostname != host:
+                logging.warning(f"[获取host]域名 {host} 已跳转到 {response.url}")
+                return False
+            if 'formhash' not in response.text:
+                logging.warning(f"[获取host]域名 {host} 内容异常")
+                return False
+            return True
+        except Exception as e:
+            logging.warning(f"[获取host]域名 {host} 无法访问: {str(e)}")
+            return False
+
+    def resolve_host(self):
+        """
+        获取可用的论坛域名
+        :return: 域名
+        """
+        candidates = []
+        publish_host = self.get_host()
+        if publish_host:
+            candidates.append(publish_host)
+        if DEFAULT_HOST not in candidates:
+            candidates.append(DEFAULT_HOST)
+        for host in candidates:
+            if self.check_host(host):
+                logging.info(f"[获取host]使用域名 {host}")
+                return host
+        logging.error(f"[获取host]候选域名均不可用: {candidates}")
+        return None
 
     def get_param(self, host, session):
         """
@@ -352,6 +403,18 @@ class AutoTask:
             return None
         return str(answer)
 
+    def clear_mathverify_cookies(self, session):
+        """
+        清理签到验证的状态cookie
+        :param session: 会话对象
+        """
+        for cookie in list(session.cookies):
+            if cookie.name.endswith('k_misign_mathv') or '_k_misign_mv_' in cookie.name:
+                try:
+                    session.cookies.clear(cookie.domain, cookie.path, cookie.name)
+                except KeyError:
+                    pass
+
     def signin(self, host, session, sign_hash):
         """
         签到（含算术验证自动答题）
@@ -373,6 +436,9 @@ class AutoTask:
             pattern = r'<!\[CDATA\[(.*?)\]\]>'
             max_retries = 3
             for retry_count in range(1, max_retries + 1):
+                # 清理残留的验证状态，否则服务端会用旧题目校验答案导致一直失败
+                self.clear_mathverify_cookies(session)
+
                 response = session.get(url, headers=headers)
                 response.raise_for_status()
                 match = re.search(pattern, response.text)
@@ -577,6 +643,11 @@ class AutoTask:
         try:
             logging.info(f"【{self.site_name}】开始执行签到任务")
 
+            host = self.resolve_host()
+            if not host:
+                logging.error("没有可用的域名，任务结束")
+                return
+
             # 首先尝试读取cookie文件
             accounts = self.read_cookie_file()
             if accounts:
@@ -588,11 +659,11 @@ class AutoTask:
                         session.cookies.set(key.strip(), value.strip())
 
                     # 检查cookie是否有效
-                    if self.check_cookie_valid(DEFAULT_HOST, session):
+                    if self.check_cookie_valid(host, session):
                         logging.info("")
                         logging.info(f"[Cookie检测]账号 {email} 的Cookie有效")
                         # 执行签到任务
-                        self.do_task(DEFAULT_HOST, session)
+                        self.do_task(host, session)
                         logging.info("")
                         # 如果是最后一个账号，执行return
                         if email == list(accounts.keys())[-1]:
@@ -613,7 +684,6 @@ class AutoTask:
                 except Exception as e:
                     logging.error(f"[Cookie文件]删除失效cookie文件失败: {str(e)}")
 
-            host = self.get_host()
             for index, (email, password, cookie) in enumerate(self.check_env(), 1):
                 logging.info("")
                 logging.info(f"------【账号{index}】开始执行任务------")
