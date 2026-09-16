@@ -16,6 +16,7 @@ cron: 10 9,10 * * *
 2025/6/17   V1.2    增加cookie存储功能
 2025/7/28   V1.3    修改头部注释，以便拉库
 2025/8/27   V1.4    修改默认域名
+2026/9/16   V1.5    适配签到算术验证，自动解题并提交答案
 """
 
 DEFAULT_HOST = "sxsy21.com" # 默认域名
@@ -323,9 +324,37 @@ class AutoTask:
             logging.error(f"[获取签到hash]发生网络错误: {str(e)}\n{traceback.format_exc()}")
             return None
 
+    def solve_mathverify(self, text):
+        """
+        解答签到算术验证题
+        :param text: 签到响应文本
+        :return: 答案字符串，没有验证题为None
+        """
+        pattern = r'签到验证[：:]\s*(-?\d+)\s*([+\-*/×÷xX])\s*(-?\d+)'
+        match = re.search(pattern, text)
+        if not match:
+            return None
+        left, operator, right = int(match.group(1)), match.group(2), int(match.group(3))
+        if operator == '+':
+            answer = left + right
+        elif operator == '-':
+            answer = left - right
+        elif operator in ('*', 'x', 'X', '×'):
+            answer = left * right
+        elif operator in ('/', '÷'):
+            if right == 0:
+                logging.warning("[签到]验证题除数为0，无法解答")
+                return None
+            answer = left / right
+            answer = int(answer) if answer.is_integer() else answer
+        else:
+            logging.warning(f"[签到]无法识别的运算符: {operator}")
+            return None
+        return str(answer)
+
     def signin(self, host, session, sign_hash):
         """
-        签到
+        签到（含算术验证自动答题）
         :param host: 域名
         :param session: 会话对象
         :param sign_hash: 签到hash
@@ -336,21 +365,37 @@ class AutoTask:
                 return
 
             url = f"https://{host}/plugin.php?id=k_misign:sign&operation=qiandao&format=global_usernav_extra&formhash={sign_hash}&inajax=1&ajaxtarget=k_misign_topb"
-            payload = {}
             headers = {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36 Edg/137.0.0.0',
                 'Host': host
             }
-            response = session.get(url, headers=headers)
-            response.raise_for_status()
             # 使用正则表达式匹配CDATA中的内容
             pattern = r'<!\[CDATA\[(.*?)\]\]>'
-            match = re.search(pattern, response.text)
-            if match:
-                text = match.group(1)
-                logging.info(f"[签到]{text}")
-            else:
-                logging.warning("[签到]响应格式异常")
+            max_retries = 3
+            for retry_count in range(1, max_retries + 1):
+                response = session.get(url, headers=headers)
+                response.raise_for_status()
+                match = re.search(pattern, response.text)
+                text = match.group(1) if match else response.text
+                if not match:
+                    logging.warning("[签到]响应格式异常")
+
+                answer = self.solve_mathverify(text)
+                if not answer:
+                    logging.info(f"[签到]{text}")
+                    return
+                logging.info(f"[签到]检测到算术验证，自动答题: {answer}")
+
+                # 提交答案
+                response = session.get(f"{url}&mathverify_answer={urllib.parse.quote(answer)}", headers=headers)
+                response.raise_for_status()
+                match = re.search(pattern, response.text)
+                text = match.group(1) if match else response.text
+                if not self.solve_mathverify(text):
+                    logging.info(f"[签到]{text}")
+                    return
+                logging.warning(f"[签到]第{retry_count}次算术验证未通过，重新答题")
+            logging.error("[签到]算术验证多次未通过，签到失败")
         except requests.RequestException as e:
             logging.error(f"[签到]发生网络错误: {str(e)}\n{traceback.format_exc()}")
         except Exception as e:
